@@ -22,6 +22,8 @@ set -euo pipefail
 #######################################
 
 # Directory to store state files (backups, logs) - REQUIRED
+# Example: STATE_DIR="/opt/tailscale-serve-preserve"
+# Example: STATE_DIR="/mnt/data/scripts/state"
 STATE_DIR="${STATE_DIR:-}"
 
 if [[ -z "$STATE_DIR" ]]; then
@@ -52,6 +54,13 @@ INITIAL_DELAY="${INITIAL_DELAY:-10}"
 FINAL_DELAY="${FINAL_DELAY:-10}"
 
 # Tailscale container name (leave empty for auto-detection)
+# The script will automatically find your Tailscale container by:
+#   1. Looking for image name containing "tailscale/tailscale"
+#   2. Looking for container name containing "tailscale"
+#   3. Checking containers for the tailscale binary
+# Only set this if auto-detection fails
+# Example: TS_CONTAINER_NAME="tailscale"
+# Example: TS_CONTAINER_NAME="ix-tailscale-tailscale-1"
 TS_CONTAINER_NAME="${TS_CONTAINER_NAME:-}"
 
 #######################################
