@@ -1,4 +1,4 @@
-# docker-tailscale-serve-preserverve
+# docker-tailscale-serve-preserve
 
 Scripts to preserve Tailscale Serve configuration when using Watchtower for automatic Docker container updates, and restore configuration after system reboots.
 
@@ -85,8 +85,8 @@ chmod +x /path/to/scripts/*.sh
 Edit the configuration section at the top of each script, or set environment variables:
 
 ```bash
-# Required: Update STATE_DIR to your preferred location
-STATE_DIR="/path/to/scripts/state"
+# REQUIRED: Set STATE_DIR to your preferred location
+STATE_DIR="/your/path/here"
 
 # Optional: Set Tailscale container name (auto-detected if not set)
 TS_CONTAINER_NAME=""
@@ -157,7 +157,7 @@ sudo systemctl enable tailscale-serve-restore.service
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STATE_DIR` | `/mnt/zfs_tank/scripts/state` | Directory for state files and logs |
+| `STATE_DIR` | **(required)** | Directory for state files and logs |
 | `SERVE_JSON` | `${STATE_DIR}/tailscale-serve.json` | Backup file location |
 | `LOG_FILE` | `${STATE_DIR}/*.log` | Log file location |
 | `TS_CONTAINER_NAME` | (auto-detect) | Tailscale container name |
@@ -170,10 +170,10 @@ sudo systemctl enable tailscale-serve-restore.service
 ### Example with environment variables
 
 ```bash
-STATE_DIR="/opt/docker/scripts/state" \
+STATE_DIR="/opt/tailscale-serve-preserve" \
 TZ="America/New_York" \
 WT_HOSTNAME="my-server" \
-/opt/docker/scripts/watchtower-with-tailscale-serve.sh
+/opt/scripts/watchtower-with-tailscale-serve.sh
 ```
 
 ## How It Works
