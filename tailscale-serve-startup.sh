@@ -11,7 +11,7 @@
 #   2. Run as a post-init/startup script
 #
 # GitHub: https://github.com/chrislongros/docker-tailscale-serve-preserve
-# License: MIT
+# License: BSD 3-Clause
 #
 
 set -euo pipefail
