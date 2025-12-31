@@ -229,7 +229,7 @@ cat /path/to/scripts/state/tailscale-serve-startup.log
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+BSD 3-Clause License - See [LICENSE](LICENSE) for details.
 
 ## Contributing
 
