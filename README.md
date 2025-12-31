@@ -11,14 +11,13 @@ Scripts to preserve Tailscale Serve configuration when using Watchtower for auto
 ![Cron Job Setup](screenshots/truenas-cron-job.png)
 
 ### TrueNAS Scale Post-Init Script Setup
-<img width="800" height="1185" alt="image" src="https://github.com/user-attachments/assets/7ed22d1b-8078-4f1b-b4a7-e34bac660c42" />
-
+![Post-Init Script Setup](screenshots/truenas-post-init.png)
 
 ### Tailscale Serve Status
 ![Tailscale Serve Status](screenshots/tailscale-serve-status.png)
 
 ### Script Logs
-<img width="2109" height="1181" alt="Screenshot 2025-12-31 at 08-46-19 TrueNAS - truenas-scale kangaroo-newton ts net" src="https://github.com/user-attachments/assets/9c569d5a-a54c-4406-a9d1-0eeb23295516" />
+![Script Logs](screenshots/script-logs.png)
 
 </details>
 
@@ -161,12 +160,21 @@ sudo systemctl enable tailscale-serve-restore.service
 | `STATE_DIR` | **(required)** | Directory for state files and logs |
 | `SERVE_JSON` | `${STATE_DIR}/tailscale-serve.json` | Backup file location |
 | `LOG_FILE` | `${STATE_DIR}/*.log` | Log file location |
-| `TS_CONTAINER_NAME` | (auto-detect) | Tailscale container name |
+| `TS_CONTAINER_NAME` | (auto-detect) | Tailscale container name (see below) |
 | `CONTAINER_TIMEOUT` | `300` | Seconds to wait for containers |
 | `TAILSCALE_READY_TIMEOUT` | `60` | Seconds to wait for Tailscale |
 | `TZ` | `UTC` | Timezone (watchtower script) |
 | `WT_IMAGE` | `containrrr/watchtower` | Watchtower image |
 | `WT_HOSTNAME` | `Docker-Host` | Watchtower notification hostname |
+
+### Tailscale Container Auto-Detection
+
+The scripts automatically find your Tailscale container by:
+1. Looking for image name containing `tailscale/tailscale`
+2. Looking for container name containing `tailscale`
+3. Checking containers for the `tailscale` binary
+
+You only need to set `TS_CONTAINER_NAME` if auto-detection fails.
 
 ### Example with environment variables
 
