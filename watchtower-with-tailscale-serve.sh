@@ -10,7 +10,7 @@
 #   2. Run via cron (e.g., daily at 3 AM)
 #
 # GitHub: https://github.com/chrislongros/docker-tailscale-serve-preserve
-# License: MIT
+# License: BSD 3-Clause
 #
 
 set -euo pipefail
