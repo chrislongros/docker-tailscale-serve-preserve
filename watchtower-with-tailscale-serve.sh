@@ -21,6 +21,8 @@ set -euo pipefail
 #######################################
 
 # Directory to store state files (backups, logs) - REQUIRED
+# Example: STATE_DIR="/opt/tailscale-serve-preserve"
+# Example: STATE_DIR="/mnt/data/scripts/state"
 STATE_DIR="${STATE_DIR:-}"
 
 if [[ -z "$STATE_DIR" ]]; then
@@ -36,12 +38,16 @@ SERVE_JSON="${SERVE_JSON:-${STATE_DIR}/tailscale-serve.json}"
 LOG_FILE="${LOG_FILE:-${STATE_DIR}/watchtower-tailscale.log}"
 
 # Watchtower image to use
+# Example: WT_IMAGE="containrrr/watchtower"
 WT_IMAGE="${WT_IMAGE:-containrrr/watchtower}"
 
 # Timezone for Watchtower
+# Example: TZ="America/New_York"
+# Example: TZ="Europe/London"
 TZ="${TZ:-UTC}"
 
 # Watchtower notification hostname
+# Example: WT_HOSTNAME="my-nas"
 WT_HOSTNAME="${WT_HOSTNAME:-Docker-Host}"
 
 # How long to wait for Tailscale to be ready (seconds)
@@ -51,6 +57,13 @@ TAILSCALE_READY_TIMEOUT="${TAILSCALE_READY_TIMEOUT:-30}"
 STABILIZATION_WAIT="${STABILIZATION_WAIT:-60}"
 
 # Tailscale container name (leave empty for auto-detection)
+# The script will automatically find your Tailscale container by:
+#   1. Looking for image name containing "tailscale/tailscale"
+#   2. Looking for container name containing "tailscale"
+#   3. Checking containers for the tailscale binary
+# Only set this if auto-detection fails
+# Example: TS_CONTAINER_NAME="tailscale"
+# Example: TS_CONTAINER_NAME="ix-tailscale-tailscale-1"
 TS_CONTAINER_NAME="${TS_CONTAINER_NAME:-}"
 
 #######################################
