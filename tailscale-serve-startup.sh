@@ -10,7 +10,7 @@
 #   1. Configure the variables below or set them as environment variables
 #   2. Run as a post-init/startup script
 #
-# GitHub: https://github.com/YOUR_USERNAME/docker-tailscale-serve-preserve
+# GitHub: https://github.com/chrislongros/docker-tailscale-serve-preserve
 # License: MIT
 #
 
@@ -21,8 +21,14 @@ set -euo pipefail
 # Override these via environment variables or edit directly
 #######################################
 
-# Directory to store state files (backups, logs)
-STATE_DIR="${STATE_DIR:-/mnt/zfs_tank/scripts/state}"
+# Directory to store state files (backups, logs) - REQUIRED
+STATE_DIR="${STATE_DIR:-}"
+
+if [[ -z "$STATE_DIR" ]]; then
+  echo "ERROR: STATE_DIR is not set. Please set it to your preferred directory." >&2
+  echo "Example: STATE_DIR=/opt/tailscale-serve-preserve $0" >&2
+  exit 1
+fi
 
 # Tailscale Serve backup file (created by watchtower-with-tailscale-serve.sh)
 SERVE_JSON="${SERVE_JSON:-${STATE_DIR}/tailscale-serve.json}"
