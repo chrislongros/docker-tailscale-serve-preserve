@@ -2,70 +2,56 @@
 #
 # tailscale-serve-startup.sh
 #
-# Restores Tailscale Serve configuration after system boot.
-# Waits for Docker containers to be healthy before applying serve rules.
-# Designed for TrueNAS Scale but works on any Docker + Tailscale setup.
+# Startup script to restore Tailscale Serve configuration after system reboot.
+# Designed to run as a systemd service or init script on TrueNAS Scale.
+#
+# Features:
+# - Waits for Tailscale container to be ready
+# - Fixes init container restart policies
+# - Restarts crashed app containers
+# - Restores Tailscale Serve configuration from backup
+#
+# Requirements:
+# - TrueNAS Scale 24.10+ (Electric Eel) with Docker-based apps
+# - Tailscale app installed
+# - Backup file created by truenas-apps-update.sh
 #
 # Usage:
-#   1. Configure the variables below or set them as environment variables
-#   2. Run as a post-init/startup script
+#   ./tailscale-serve-startup.sh
 #
-# GitHub: https://github.com/chrislongros/docker-tailscale-serve-preserve
-# License: BSD 3-Clause
+# Systemd Integration:
+#   See README.md for systemd service unit example.
+#
+# License: BSD-3-Clause
 #
 
-set -euo pipefail
+set -uo pipefail
 
-#######################################
-# CONFIGURATION
-# Override these via environment variables or edit directly
-#######################################
+# ============================================================================
+# User Configuration - Modify these values for your setup
+# ============================================================================
 
-# Directory to store state files (backups, logs) - REQUIRED
-# Example: STATE_DIR="/opt/tailscale-serve-preserve"
-# Example: STATE_DIR="/mnt/data/scripts/state"
-STATE_DIR="${STATE_DIR:-}"
+# Directory for state files and logs (must match truenas-apps-update.sh)
+STATE_DIR="/mnt/tank/scripts/state"
 
-if [[ -z "$STATE_DIR" ]]; then
-  echo "ERROR: STATE_DIR is not set. Please set it to your preferred directory." >&2
-  echo "Example: STATE_DIR=/opt/tailscale-serve-preserve $0" >&2
-  exit 1
-fi
-
-# Tailscale Serve backup file (created by watchtower-with-tailscale-serve.sh)
-SERVE_JSON="${SERVE_JSON:-${STATE_DIR}/tailscale-serve.json}"
+# Tailscale Serve backup file
+SERVE_JSON="${STATE_DIR}/tailscale-serve.json"
 
 # Log file location
-LOG_FILE="${LOG_FILE:-${STATE_DIR}/tailscale-serve-startup.log}"
+LOG_FILE="${STATE_DIR}/tailscale-serve-startup.log"
 
-# How long to wait for containers to be healthy (seconds)
-CONTAINER_TIMEOUT="${CONTAINER_TIMEOUT:-300}"
+# How long to wait for Tailscale container to appear (seconds)
+TAILSCALE_CONTAINER_TIMEOUT=180
 
-# How long to wait for Tailscale to be ready (seconds)
-TAILSCALE_READY_TIMEOUT="${TAILSCALE_READY_TIMEOUT:-60}"
+# How long to wait for containers to start before applying serves (seconds)
+CONTAINER_STARTUP_WAIT=90
 
-# Check interval when waiting for containers (seconds)
-CHECK_INTERVAL="${CHECK_INTERVAL:-5}"
+# Interval between checks (seconds)
+CHECK_INTERVAL=5
 
-# Initial delay to let Docker fully start (seconds)
-INITIAL_DELAY="${INITIAL_DELAY:-10}"
-
-# Final stabilization delay before applying serves (seconds)
-FINAL_DELAY="${FINAL_DELAY:-10}"
-
-# Tailscale container name (leave empty for auto-detection)
-# The script will automatically find your Tailscale container by:
-#   1. Looking for image name containing "tailscale/tailscale"
-#   2. Looking for container name containing "tailscale"
-#   3. Checking containers for the tailscale binary
-# Only set this if auto-detection fails
-# Example: TS_CONTAINER_NAME="tailscale"
-# Example: TS_CONTAINER_NAME="ix-tailscale-tailscale-1"
-TS_CONTAINER_NAME="${TS_CONTAINER_NAME:-}"
-
-#######################################
-# END CONFIGURATION
-#######################################
+# ============================================================================
+# End of User Configuration
+# ============================================================================
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -75,219 +61,157 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
-error() {
-  log "ERROR: $*" >&2
-  exit 1
-}
-
-if ! command -v docker &> /dev/null; then
-  error "Docker command not found. PATH=$PATH"
-fi
-
 detect_tailscale_container() {
-  local container_name
-  
   # Try to find by image name first
-  container_name=$(docker ps --format '{{.Names}}\t{{.Image}}' | grep -i 'tailscale/tailscale' | head -n1 | cut -f1)
-  if [[ -n "$container_name" ]]; then
-    echo "$container_name"
+  local container
+  container=$(docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | grep -i 'tailscale/tailscale' | head -n1 | cut -f1)
+  if [[ -n "$container" ]]; then
+    echo "$container"
     return 0
   fi
-  
-  # Try to find by container name
-  container_name=$(docker ps --format '{{.Names}}' | grep -i tailscale | head -n1)
-  if [[ -n "$container_name" ]]; then
-    echo "$container_name"
+  # Fall back to name matching
+  container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -i tailscale | head -n1)
+  if [[ -n "$container" ]]; then
+    echo "$container"
     return 0
   fi
-  
-  # Last resort: check each container for tailscale binary
-  while IFS= read -r name; do
-    if docker exec "$name" which tailscale &>/dev/null; then
-      echo "$name"
-      return 0
-    fi
-  done < <(docker ps --format '{{.Names}}')
-  
   return 1
 }
 
-ts() { 
-  docker exec "$TS_CONTAINER_NAME" tailscale "$@"
-}
-
-wait_for_tailscale() {
+wait_for_tailscale_container() {
   local timeout=$1
   local elapsed=0
-  log "Waiting for Tailscale to be ready (timeout: ${timeout}s)..."
+  log "Waiting for Tailscale container (timeout: ${timeout}s)..."
   while [[ $elapsed -lt $timeout ]]; do
-    if ts status >/dev/null 2>&1; then
-      log "Tailscale is ready"
+    if TS_CONTAINER=$(detect_tailscale_container) && [[ -n "$TS_CONTAINER" ]]; then
+      log "Detected Tailscale container: $TS_CONTAINER"
       return 0
     fi
-    sleep 2
-    elapsed=$((elapsed + 2))
+    sleep $CHECK_INTERVAL
+    elapsed=$((elapsed + CHECK_INTERVAL))
   done
-  error "Tailscale did not become ready within ${timeout}s"
+  return 1
 }
 
 get_ports_from_backup() {
-  if [[ ! -f "${SERVE_JSON}" ]] || [[ ! -s "${SERVE_JSON}" ]]; then
-    return 1
-  fi
-  grep -oP '"([0-9]+)":\s*\{' "${SERVE_JSON}" | grep -oP '[0-9]+' | sort -n | uniq
+  [[ -f "$SERVE_JSON" ]] && grep -oP '"([0-9]+)":\s*\{' "$SERVE_JSON" | grep -oP '[0-9]+' | sort -n | uniq
 }
 
-# Get container name for a port by checking which container has that port mapped
-get_container_for_port() {
-  local port=$1
-  docker ps --format '{{.Names}}\t{{.Ports}}' | grep ":${port}->" | head -n1 | cut -f1
-}
-
-# Check if a container is healthy
-is_container_healthy() {
-  local container=$1
-  local health
-  health=$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "none")
+# ============================================================================
+# Init Container Restart Policy Fix
+# ============================================================================
+fix_init_container_restart_policies() {
+  log "Fixing init container restart policies..."
+  local fixed=0
+  local containers
+  containers=$(docker ps -a --format '{{.Names}}' | grep -E '(permissions|upgrade|init)' || true)
   
-  if [[ "$health" == "healthy" ]]; then
-    return 0
-  elif [[ "$health" == "none" ]]; then
-    # Container has no healthcheck, check if it's running
-    local state
-    state=$(docker inspect --format='{{.State.Status}}' "$container" 2>/dev/null || echo "unknown")
-    [[ "$state" == "running" ]]
-  else
-    return 1
-  fi
-}
-
-# Wait for all containers that have ports in our backup to be healthy
-wait_for_containers() {
-  local ports="$1"
-  local timeout=$CONTAINER_TIMEOUT
-  local elapsed=0
-  
-  log "Waiting for containers to be healthy (timeout: ${timeout}s)..."
-  
-  # Build list of containers we need to wait for
-  local containers=()
-  for port in $ports; do
-    local container
-    container=$(get_container_for_port "$port")
-    if [[ -n "$container" ]] && [[ ! " ${containers[*]:-} " =~ " ${container} " ]]; then
-      containers+=("$container")
-    fi
-  done
-  
-  if [[ ${#containers[@]} -eq 0 ]]; then
-    log "No containers found for ports, waiting ${CHECK_INTERVAL}s and proceeding..."
-    sleep "$CHECK_INTERVAL"
+  if [[ -z "$containers" ]]; then
+    log "No init containers found"
     return 0
   fi
   
-  log "Found ${#containers[@]} containers to monitor: ${containers[*]}"
-  
-  while [[ $elapsed -lt $timeout ]]; do
-    local all_healthy=true
-    local status_line=""
+  for container in $containers; do
+    local current_policy
+    current_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$container" 2>/dev/null || echo "unknown")
     
-    for container in "${containers[@]}"; do
-      if is_container_healthy "$container"; then
-        status_line+="$container:OK "
+    if [[ "$current_policy" != "no" && "$current_policy" != "" ]]; then
+      if docker update --restart=no "$container" >/dev/null 2>&1; then
+        log "  Fixed $container: $current_policy -> no"
+        fixed=$((fixed + 1))
       else
-        status_line+="$container:WAIT "
-        all_healthy=false
+        log "WARN: Failed to fix $container"
       fi
-    done
-    
-    if $all_healthy; then
-      log "All containers healthy: $status_line"
-      return 0
-    fi
-    
-    log "Status: $status_line (${elapsed}s/${timeout}s)"
-    sleep "$CHECK_INTERVAL"
-    elapsed=$((elapsed + CHECK_INTERVAL))
-  done
-  
-  log "WARN: Timeout waiting for containers, proceeding anyway..."
-  return 0
-}
-
-apply_serves() {
-  local ports="$1"
-  local port_count
-  port_count=$(echo "$ports" | wc -w)
-  
-  log "==> Applying Tailscale Serve configuration for $port_count ports"
-  
-  local success_count=0
-  local fail_count=0
-  
-  for port in $ports; do
-    # Use http://127.0.0.1:$port to proxy to localhost instead of binding to the port directly
-    # This avoids conflicts with Docker containers that also bind to 0.0.0.0:$port
-    if docker exec "$TS_CONTAINER_NAME" tailscale serve --bg --https="$port" "http://127.0.0.1:$port" >> "$LOG_FILE" 2>&1; then
-      success_count=$((success_count + 1))
-      log "Configured port $port"
-    else
-      fail_count=$((fail_count + 1))
-      log "WARN: Failed to configure port $port"
     fi
   done
   
-  log "Configured $success_count of $port_count ports successfully"
-  if [[ $fail_count -gt 0 ]]; then
-    log "WARN: $fail_count ports failed to configure"
+  if [[ $fixed -gt 0 ]]; then
+    log "Fixed restart policy on $fixed init container(s)"
+  else
+    log "All init containers have correct restart policy"
   fi
 }
 
-# Main execution
+restart_crashed_containers() {
+  log "Checking for crashed containers..."
+  local crashed
+  crashed=$(docker ps -a --filter "status=exited" --format '{{.Names}}' | grep -E '^ix-' | grep -Ev 'permissions|upgrade|init|config' || true)
+  if [[ -n "$crashed" ]]; then
+    local count
+    count=$(echo "$crashed" | wc -l)
+    log "Found $count crashed containers, restarting..."
+    echo "$crashed" | xargs -r docker start >> "$LOG_FILE" 2>&1 || true
+    log "Restarted containers"
+  else
+    log "No crashed containers found"
+  fi
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
 log "=========================================="
 log "==> Tailscale Serve Startup Script"
 log "=========================================="
 
-# Wait a bit for Docker to be fully ready
-log "Waiting ${INITIAL_DELAY}s for Docker to be fully ready..."
-sleep "$INITIAL_DELAY"
-
-# Detect Tailscale container
-if [[ -n "${TS_CONTAINER_NAME}" ]]; then
-  log "Using manually specified container: $TS_CONTAINER_NAME"
-else
-  log "Auto-detecting Tailscale container..."
-  TS_CONTAINER_NAME=$(detect_tailscale_container) || error "Could not auto-detect Tailscale container. Set TS_CONTAINER_NAME manually."
-  log "Detected Tailscale container: $TS_CONTAINER_NAME"
+# Wait for Tailscale container
+if ! wait_for_tailscale_container "$TAILSCALE_CONTAINER_TIMEOUT"; then
+  log "ERROR: Tailscale container not found after ${TAILSCALE_CONTAINER_TIMEOUT}s"
+  exit 1
 fi
 
-# Wait for Tailscale to be ready
-wait_for_tailscale "$TAILSCALE_READY_TIMEOUT"
+# Wait for Tailscale daemon to be ready
+log "Waiting for Tailscale to be ready..."
+for i in {1..30}; do
+  if docker exec "$TS_CONTAINER" tailscale status >/dev/null 2>&1; then
+    log "Tailscale is ready"
+    break
+  fi
+  sleep 2
+done
 
-# Get ports from backup
-ports=$(get_ports_from_backup) || error "No ports found in backup file: ${SERVE_JSON}"
-log "Found ports in backup: $(echo $ports | tr '\n' ' ')"
+# Reset existing serves to free ports
+log "Resetting Tailscale Serve to free ports..."
+docker exec "$TS_CONTAINER" tailscale serve reset >> "$LOG_FILE" 2>&1 || true
 
-# Wait for containers to be healthy
-wait_for_containers "$ports"
+# Fix init container restart policies BEFORE waiting
+log "==> Fixing init container restart policies..."
+fix_init_container_restart_policies
 
-# Small additional delay for stability
-log "Waiting ${FINAL_DELAY}s for final stabilization..."
-sleep "$FINAL_DELAY"
+# Wait for containers to start
+log "Waiting ${CONTAINER_STARTUP_WAIT}s for containers to start..."
+sleep "$CONTAINER_STARTUP_WAIT"
 
-# Apply serves
-apply_serves "$ports"
+# Fix again and restart crashed containers
+fix_init_container_restart_policies
+restart_crashed_containers
+sleep 30
 
-# Verify
-sleep 2
-log "==> Verifying Tailscale Serve status"
-if ts serve status >/dev/null 2>&1; then
-  active_count=$(ts serve status --json 2>/dev/null | grep -oP '"[0-9]+":' | wc -l || echo 0)
-  log "Active serves: $active_count ports"
-  ts serve status >> "$LOG_FILE" 2>&1
-else
-  log "WARN: Could not verify Tailscale Serve status"
+# Final check
+fix_init_container_restart_policies
+restart_crashed_containers
+
+# Apply Tailscale Serve configuration
+ports=$(get_ports_from_backup)
+if [[ -z "$ports" ]]; then
+  log "ERROR: No ports found in backup file: $SERVE_JSON"
+  exit 1
 fi
 
+log "Applying serves for ports: $(echo $ports | tr '\n' ' ')"
+
+success=0
+fail=0
+for port in $ports; do
+  if docker exec "$TS_CONTAINER" tailscale serve --bg --https="$port" "http://127.0.0.1:$port" >/dev/null 2>&1; then
+    success=$((success + 1))
+  else
+    fail=$((fail + 1))
+    log "WARN: Failed to configure port $port"
+  fi
+done
+
+log "Configured $success ports ($fail failed)"
 log "==> Startup script completed successfully"
 exit 0
