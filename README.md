@@ -4,8 +4,7 @@ Scripts to preserve Tailscale Serve configuration when using Watchtower for auto
 
 ## Screenshots
 
-<details>
-<summary>Click to expand screenshots</summary>
+<img width="2109" height="1025" alt="Screenshot 2026-01-12 at 21-32-26 TrueNAS - truenas-scale kangaroo-newton ts net" src="https://github.com/user-attachments/assets/cb41cd05-96c8-46bf-bc4c-79ab05ead8c4" />
 
 ### TrueNAS Scale Cron Job Setup
 ![Cron Job Setup](screenshots/truenas-cron-job.png)
