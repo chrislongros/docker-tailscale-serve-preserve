@@ -27,6 +27,8 @@ When running Tailscale in a Docker container and using [Watchtower](https://cont
 1. Watchtower recreates the Tailscale container, wiping all `tailscale serve` rules
 2. On system reboot, Tailscale Serve rules aren't automatically restored
 3. Port conflicts can occur when both Tailscale Serve and Docker containers try to bind to the same port
+4. **TrueNAS Scale specific:** After reboot, containers may start with port binding configurations but the actual host port mappings fail to apply due to a race condition in Docker/TrueNAS orchestration
+5. **TrueNAS Scale specific:** Some containers may get stuck in restart loops, preventing services from becoming accessible
 
 ## Solution
 
@@ -36,6 +38,9 @@ These scripts:
 - **Restore** the configuration after container updates
 - **Wait** for containers to be healthy before applying serve rules on boot
 - **Avoid port conflicts** by proxying to `127.0.0.1` instead of binding directly
+- **Detect and fix missing port bindings** by restarting affected TrueNAS apps via CLI
+- **Fix restart loops** by detecting containers stuck in "Restarting" state and properly restarting their parent apps
+- **Validate ports before configuring** Tailscale Serve to avoid errors on ports with no listeners
 
 ## Scripts
 
@@ -56,9 +61,50 @@ Run as a post-init/startup script after system boot.
 
 **What it does:**
 1. Waits for Docker and Tailscale to be ready
-2. Reads ports from the backup JSON file
-3. Waits for containers using those ports to be healthy
-4. Applies Tailscale Serve rules
+2. Fixes init container restart policies (prevents restart loops)
+3. Restarts any crashed containers
+4. **Detects and fixes containers stuck in restart loops**
+5. **Verifies port bindings and restarts apps with missing bindings**
+6. Reads ports from the backup JSON file
+7. **Validates that ports are actually listening before configuring Tailscale Serve**
+8. Applies Tailscale Serve rules
+
+## TrueNAS Scale Port Binding Issue
+
+### The Problem
+
+After a TrueNAS Scale reboot, there's a race condition where:
+
+1. Docker daemon starts
+2. TrueNAS app containers are created with port binding *configurations*
+3. Containers start, but the actual host port mappings may not be applied
+4. Result: Container is "running" but inaccessible because no port is bound to the host
+
+You can identify this issue by running:
+```bash
+# Shows port binding is configured...
+docker inspect <container> --format '{{json .HostConfig.PortBindings}}'
+# Output: {"31015/tcp":[{"HostIp":"","HostPort":"31015"}]}
+
+# ...but no actual port is bound
+docker port <container>
+# Output: (empty)
+```
+
+### The Fix
+
+The updated startup script now:
+
+1. **Detects missing port bindings** by comparing configured vs actual port mappings
+2. **Extracts the app name** from the container name (e.g., `ix-portainer-portainer-1` → `portainer`)
+3. **Restarts the app** using TrueNAS CLI: `cli -c "app stop <app>"` / `cli -c "app start <app>"`
+4. **Waits for stabilization** before proceeding
+
+This properly recreates the containers through TrueNAS's orchestration layer, which correctly applies port bindings.
+
+### Containers in Restart Loops
+
+The script also detects containers stuck in "Restarting" state (often caused by DNS resolution failures between containers in the same app stack) and restarts their parent apps to fix the issue.
 
 ## Installation
 
@@ -93,6 +139,7 @@ TS_CONTAINER_NAME=""
 # Optional: Customize timeouts
 CONTAINER_TIMEOUT=300
 TAILSCALE_READY_TIMEOUT=60
+CONTAINER_STARTUP_WAIT=180
 ```
 
 ### 3. Set up scheduled tasks
@@ -161,6 +208,7 @@ sudo systemctl enable tailscale-serve-restore.service
 | `LOG_FILE` | `${STATE_DIR}/*.log` | Log file location |
 | `TS_CONTAINER_NAME` | (auto-detect) | Tailscale container name (see below) |
 | `CONTAINER_TIMEOUT` | `300` | Seconds to wait for containers |
+| `CONTAINER_STARTUP_WAIT` | `180` | Seconds to wait for all containers to start on boot |
 | `TAILSCALE_READY_TIMEOUT` | `60` | Seconds to wait for Tailscale |
 | `TZ` | `UTC` | Timezone (watchtower script) |
 | `WT_IMAGE` | `containrrr/watchtower` | Watchtower image |
@@ -203,6 +251,26 @@ This way:
 - Tailscale Serve listens on the Tailnet IP and proxies to `127.0.0.1:30070`
 - No conflict!
 
+### Port Binding Verification (TrueNAS Scale)
+
+Before applying Tailscale Serve rules, the startup script:
+
+1. **Scans all `ix-*` containers** (TrueNAS managed apps)
+2. **Compares configured vs actual port bindings** using `docker inspect` and `docker port`
+3. **Identifies apps with missing bindings** and restarts them via TrueNAS CLI
+4. **Checks if ports are actually listening** using `ss -tlnp` before configuring Tailscale Serve
+
+This ensures that Tailscale Serve only configures ports that have active listeners, and automatically fixes the common TrueNAS port binding race condition.
+
+### Restart Loop Detection
+
+The script detects containers stuck in "Restarting" state, which commonly happens when:
+- DNS resolution fails between containers in the same app stack
+- Database containers aren't ready when the main app starts
+- Network initialization race conditions occur
+
+When detected, the script restarts the parent app through TrueNAS CLI, which properly recreates the entire app stack with correct networking.
+
 ### Backup Format
 
 The scripts backup the output of `tailscale serve status --json` and parse the port numbers from the TCP section. Timestamped backups are kept (last 10).
@@ -219,12 +287,47 @@ cat /path/to/scripts/state/watchtower-tailscale.log
 cat /path/to/scripts/state/tailscale-serve-startup.log
 ```
 
+### Example Log Output
+
+```
+[2026-01-24 18:50:38] ==> Verifying port bindings for all apps...
+[2026-01-24 18:50:38]   MISSING PORT BINDING: ix-portainer-portainer-1 (app: portainer)
+[2026-01-24 18:50:38]   MISSING PORT BINDING: ix-heimdall-heimdall-1 (app: heimdall)
+[2026-01-24 18:50:38] Found 2 app(s) with missing port bindings
+[2026-01-24 18:50:38]   Restarting app: portainer
+[2026-01-24 18:50:45]   Successfully restarted: portainer
+[2026-01-24 18:50:45]   Restarting app: heimdall
+[2026-01-24 18:50:52]   Successfully restarted: heimdall
+[2026-01-24 18:51:22] All port bindings verified OK
+```
+
 ## Requirements
 
 - Docker
 - Tailscale running in a Docker container
 - Bash 4.0+
-- Standard Unix tools: `grep`, `cut`, `sort`, `uniq`
+- Standard Unix tools: `grep`, `cut`, `sort`, `uniq`, `ss`
+- **TrueNAS Scale:** CLI access (`cli` command) for app restart functionality
+
+## Troubleshooting
+
+### Container accessible locally but not via Tailscale
+
+1. Check if Tailscale Serve is configured: `docker exec <tailscale-container> tailscale serve status`
+2. Check if port is listening: `ss -tlnp | grep <port>`
+3. Check startup script log for errors
+
+### Apps not accessible after reboot (TrueNAS Scale)
+
+1. Check for missing port bindings: `docker port <container-name>`
+2. If empty, restart the app: `sudo cli -c "app stop <app>" && sudo cli -c "app start <app>"`
+3. Check startup script log: `cat /path/to/scripts/state/tailscale-serve-startup.log`
+
+### Containers stuck in restart loop
+
+1. Check container logs: `docker logs <container-name>`
+2. Common causes: DNS resolution failure, database not ready
+3. Restart the parent app via TrueNAS CLI or UI
 
 ## License
 
@@ -233,3 +336,15 @@ BSD 3-Clause License - See [LICENSE](LICENSE) for details.
 ## Contributing
 
 Contributions welcome! Please open an issue or PR.
+
+## Changelog
+
+### v1.1.0 (2026-01-24)
+
+- **New:** Port binding verification for TrueNAS Scale apps
+- **New:** Automatic app restart for containers with missing port bindings
+- **New:** Restart loop detection and automatic fix
+- **New:** Pre-flight port listening check before configuring Tailscale Serve
+- **New:** Configurable `CONTAINER_STARTUP_WAIT` variable
+- **Improved:** Better logging with failed port details
+- **Improved:** Documentation for TrueNAS Scale specific issues
