@@ -22,7 +22,7 @@ LOG_FILE="${STATE_DIR}/tailscale-serve-startup.log"
 
 TAILSCALE_CONTAINER_TIMEOUT=180
 CHECK_INTERVAL=5
-CONTAINER_STARTUP_WAIT=180
+CONTAINER_STARTUP_WAIT=300
 
 # Will be set by detect_cli_method
 CLI_METHOD=""
@@ -40,15 +40,21 @@ log() {
 detect_cli_method() {
   log "Detecting TrueNAS CLI method..."
   
+  local cli_output
+  local midclt_output
+  
   # Try cli first (works on older versions)
-  if cli -c "app list" >/dev/null 2>&1; then
+  # Must check actual output - cli may return 0 even when it fails
+  cli_output=$(cli -c "app list" 2>&1 || true)
+  if [[ -n "$cli_output" ]] && ! echo "$cli_output" | grep -qi "not found\|error\|namespace"; then
     CLI_METHOD="cli"
     log "  Using 'cli' commands (TrueNAS 24.x/25.x style)"
     return 0
   fi
   
   # Try midclt (works on newer versions and is more reliable)
-  if midclt call app.query >/dev/null 2>&1; then
+  midclt_output=$(midclt call app.query 2>/dev/null | jq -r '.[0].name' 2>/dev/null || true)
+  if [[ -n "$midclt_output" ]]; then
     CLI_METHOD="midclt"
     log "  Using 'midclt' commands (TrueNAS 25.x/26.x style)"
     return 0
@@ -126,6 +132,67 @@ get_ports_from_backup() {
 }
 
 # ============================================================================
+# Wait for all apps to finish deploying (smarter than fixed timeout)
+# Returns when no apps are in DEPLOYING state or timeout reached
+# Also detects stuck apps and tries to fix them
+# ============================================================================
+wait_for_apps_ready() {
+  local max_wait=$1
+  local elapsed=0
+  local check_interval=15
+  local stuck_threshold=120  # Consider stuck after 2 minutes of no change
+  local last_deploying=""
+  local stuck_time=0
+  
+  log "Waiting for all apps to finish deploying (max ${max_wait}s)..."
+  
+  while [[ $elapsed -lt $max_wait ]]; do
+    local deploying
+    deploying=$(midclt call app.query 2>/dev/null | jq -r '[.[] | select(.state == "DEPLOYING")] | length' || echo "0")
+    
+    if [[ "$deploying" == "0" ]]; then
+      log "All apps finished deploying after ${elapsed}s"
+      return 0
+    fi
+    
+    local deploying_names
+    deploying_names=$(midclt call app.query 2>/dev/null | jq -r '.[] | select(.state == "DEPLOYING") | .name' | sort | tr '\n' ' ' || true)
+    
+    # Check if same apps are stuck deploying
+    if [[ "$deploying_names" == "$last_deploying" ]]; then
+      stuck_time=$((stuck_time + check_interval))
+      
+      if [[ $stuck_time -ge $stuck_threshold ]]; then
+        log "  WARN: Apps appear stuck in DEPLOYING for ${stuck_time}s, attempting fix..."
+        
+        # Try to start any containers stuck in Created state
+        local created
+        created=$(docker ps -a --filter "status=created" --format '{{.Names}}' | grep -E '^ix-' | grep -Ev 'permissions|upgrade|init|config' || true)
+        if [[ -n "$created" ]]; then
+          log "  Found containers in 'Created' state, starting them..."
+          for container in $created; do
+            log "    Starting: $container"
+            docker start "$container" >> "$LOG_FILE" 2>&1 || true
+          done
+          stuck_time=0  # Reset stuck timer after fix attempt
+        fi
+      fi
+    else
+      stuck_time=0  # Reset if deploying list changed
+    fi
+    last_deploying="$deploying_names"
+    
+    log "  Still deploying ($deploying apps): $deploying_names- waiting..."
+    
+    sleep $check_interval
+    elapsed=$((elapsed + check_interval))
+  done
+  
+  log "WARN: Timeout waiting for apps to deploy, continuing anyway..."
+  return 1
+}
+
+# ============================================================================
 # Get the actual TrueNAS app name for a container
 # Queries the app list and matches against container prefix
 # This correctly handles hyphenated app names like "speedtest-tracker"
@@ -193,6 +260,30 @@ restart_crashed_containers() {
     log "Restarted containers"
   else
     log "No crashed containers found"
+  fi
+}
+
+# ============================================================================
+# Start containers stuck in "Created" state (never started)
+# ============================================================================
+start_created_containers() {
+  log "Checking for containers stuck in 'Created' state..."
+  local created
+  created=$(docker ps -a --filter "status=created" --format '{{.Names}}' | grep -E '^ix-' | grep -Ev 'permissions|upgrade|init|config' || true)
+  if [[ -n "$created" ]]; then
+    local count
+    count=$(echo "$created" | wc -l)
+    log "Found $count containers in 'Created' state, starting..."
+    for container in $created; do
+      log "  Starting: $container"
+      if docker start "$container" >> "$LOG_FILE" 2>&1; then
+        log "    Started successfully"
+      else
+        log "    WARN: Failed to start (check logs: docker logs $container)"
+      fi
+    done
+  else
+    log "No containers stuck in 'Created' state"
   fi
 }
 
@@ -340,20 +431,21 @@ docker exec "$TS_CONTAINER" tailscale serve reset >> "$LOG_FILE" 2>&1 || true
 log "==> Fixing init container restart policies (prevents restart loops)..."
 fix_init_container_restart_policies
 
-# Wait for containers to start
-log "Waiting ${CONTAINER_STARTUP_WAIT}s for all containers to start..."
-sleep "$CONTAINER_STARTUP_WAIT"
+# Wait for containers to start (smart wait for DEPLOYING apps)
+wait_for_apps_ready "$CONTAINER_STARTUP_WAIT"
 
 # Fix again in case new init containers appeared
 fix_init_container_restart_policies
 
-# Restart crashed containers (after fixing init containers)
+# Restart crashed containers and start any stuck in Created state
 restart_crashed_containers
+start_created_containers
 sleep 30
 
 # Check and fix again
 fix_init_container_restart_policies
 restart_crashed_containers
+start_created_containers
 
 # Fix containers stuck in restart loops
 fix_restart_loops
@@ -395,6 +487,56 @@ log "Configured $success ports ($fail failed)"
 if [[ -n "$failed_ports" ]]; then
   log "Failed ports:$failed_ports"
 fi
+
+# ============================================================================
+# Second pass: retry failed ports after additional wait
+# ============================================================================
+if [[ $fail -gt 0 && -n "$failed_ports" ]]; then
+  log "==> Second pass: waiting 60s then retrying failed ports..."
+  sleep 60
+  
+  # Check if any DEPLOYING apps remain
+  still_deploying=$(midclt call app.query 2>/dev/null | jq -r '.[] | select(.state == "DEPLOYING") | .name' | tr '\n' ' ' || true)
+  if [[ -n "$still_deploying" ]]; then
+    log "  Apps still deploying: $still_deploying"
+    log "  Waiting additional 60s..."
+    sleep 60
+  fi
+  
+  local retry_success=0
+  local retry_fail=0
+  local still_failed=""
+  
+  for port in $failed_ports; do
+    # Check if something is now listening on this port
+    if ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+      log "  Port $port still has nothing listening - skipping"
+      retry_fail=$((retry_fail + 1))
+      still_failed="$still_failed $port"
+      continue
+    fi
+    
+    if docker exec "$TS_CONTAINER" tailscale serve --bg --https="$port" "http://127.0.0.1:$port" >/dev/null 2>&1; then
+      log "  Port $port: SUCCESS on retry"
+      retry_success=$((retry_success + 1))
+    else
+      log "  Port $port: FAILED on retry"
+      retry_fail=$((retry_fail + 1))
+      still_failed="$still_failed $port"
+    fi
+  done
+  
+  log "Second pass: $retry_success recovered, $retry_fail still failed"
+  if [[ -n "$still_failed" ]]; then
+    log "Still failed ports:$still_failed"
+  fi
+  
+  # Update totals
+  success=$((success + retry_success))
+  fail=$retry_fail
+fi
+
+log "==> Final result: $success ports configured, $fail failed"
 
 log "==> Startup script completed successfully"
 exit 0
