@@ -52,6 +52,25 @@ get_ports_from_backup() {
 }
 
 # ============================================================================
+# Get the actual TrueNAS app name for a container
+# Queries the app list and matches against container prefix
+# This correctly handles hyphenated app names like "speedtest-tracker"
+# ============================================================================
+get_app_name_for_container() {
+  local container="$1"
+  local apps
+  apps=$(cli -c "app list" 2>/dev/null | awk 'NR>3 && NF {print $1}' | grep -v '^-' || true)
+  
+  for app in $apps; do
+    if [[ "$container" == "ix-${app}-"* ]]; then
+      echo "$app"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ============================================================================
 # CRITICAL: Fix init container restart policies
 # Init containers (permissions, upgrade, init) must have restart=no
 # otherwise they loop forever and prevent main containers from starting
@@ -104,7 +123,7 @@ restart_crashed_containers() {
 }
 
 # ============================================================================
-# NEW: Verify port bindings and restart apps with missing bindings
+# Verify port bindings and restart apps with missing bindings
 # This fixes the race condition where containers start but ports don't bind
 # ============================================================================
 verify_and_fix_port_bindings() {
@@ -126,9 +145,14 @@ verify_and_fix_port_bindings() {
       actual_ports=$(docker port "$container" 2>/dev/null)
       
       if [[ -z "$actual_ports" ]]; then
-        # Port configured but not bound - extract app name
+        # Port configured but not bound - get actual app name
         local app_name
-        app_name=$(echo "$container" | sed -E 's/^ix-([^-]+)-.*/\1/')
+        app_name=$(get_app_name_for_container "$container")
+        
+        if [[ -z "$app_name" ]]; then
+          log "  WARN: Could not determine app name for $container"
+          continue
+        fi
         
         # Avoid duplicates
         if [[ ! " ${apps_to_restart[*]:-} " =~ " ${app_name} " ]]; then
@@ -166,7 +190,7 @@ verify_and_fix_port_bindings() {
 }
 
 # ============================================================================
-# NEW: Check for containers stuck in restart loop
+# Check for containers stuck in restart loop
 # ============================================================================
 fix_restart_loops() {
   log "Checking for containers in restart loops..."
@@ -179,7 +203,13 @@ fix_restart_loops() {
     
     for container in $restarting; do
       local app_name
-      app_name=$(echo "$container" | sed -E 's/^ix-([^-]+)-.*/\1/')
+      app_name=$(get_app_name_for_container "$container")
+      
+      if [[ -z "$app_name" ]]; then
+        log "  WARN: Could not determine app name for $container"
+        continue
+      fi
+      
       log "  $container (app: $app_name)"
       
       if [[ ! " ${apps_to_restart[*]:-} " =~ " ${app_name} " ]]; then
@@ -245,10 +275,10 @@ sleep 30
 fix_init_container_restart_policies
 restart_crashed_containers
 
-# NEW: Fix containers stuck in restart loops
+# Fix containers stuck in restart loops
 fix_restart_loops
 
-# NEW: Verify and fix port bindings before applying Tailscale serves
+# Verify and fix port bindings before applying Tailscale serves
 verify_and_fix_port_bindings
 
 # Now apply serves (after all containers are running with correct port bindings)
