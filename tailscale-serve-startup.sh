@@ -9,6 +9,8 @@
 # - Restarts any crashed containers
 # - Applies Tailscale Serve configuration from backup
 #
+# Compatible with TrueNAS Scale 24.x, 25.x, and 26.x
+#
 
 set -uo pipefail
 
@@ -22,10 +24,82 @@ TAILSCALE_CONTAINER_TIMEOUT=180
 CHECK_INTERVAL=5
 CONTAINER_STARTUP_WAIT=180
 
+# Will be set by detect_cli_method
+CLI_METHOD=""
+
 mkdir -p "$STATE_DIR"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+# ============================================================================
+# Detect which CLI method works on this TrueNAS version
+# Sets CLI_METHOD to "cli" or "midclt"
+# ============================================================================
+detect_cli_method() {
+  log "Detecting TrueNAS CLI method..."
+  
+  # Try cli first (works on older versions)
+  if cli -c "app list" >/dev/null 2>&1; then
+    CLI_METHOD="cli"
+    log "  Using 'cli' commands (TrueNAS 24.x/25.x style)"
+    return 0
+  fi
+  
+  # Try midclt (works on newer versions and is more reliable)
+  if midclt call app.query >/dev/null 2>&1; then
+    CLI_METHOD="midclt"
+    log "  Using 'midclt' commands (TrueNAS 25.x/26.x style)"
+    return 0
+  fi
+  
+  log "ERROR: Could not detect working CLI method"
+  return 1
+}
+
+# ============================================================================
+# Get list of all app names (version-agnostic)
+# ============================================================================
+get_app_names() {
+  case "$CLI_METHOD" in
+    cli)
+      cli -c "app list" 2>/dev/null | awk 'NR>3 && NF {print $1}' | grep -v '^-' || true
+      ;;
+    midclt)
+      midclt call app.query 2>/dev/null | jq -r '.[].name' || true
+      ;;
+  esac
+}
+
+# ============================================================================
+# Stop an app (version-agnostic)
+# ============================================================================
+app_stop() {
+  local app="$1"
+  case "$CLI_METHOD" in
+    cli)
+      cli -c "app stop $app" >> "$LOG_FILE" 2>&1
+      ;;
+    midclt)
+      midclt call app.stop "$app" >> "$LOG_FILE" 2>&1
+      ;;
+  esac
+}
+
+# ============================================================================
+# Start an app (version-agnostic)
+# ============================================================================
+app_start() {
+  local app="$1"
+  case "$CLI_METHOD" in
+    cli)
+      cli -c "app start $app" >> "$LOG_FILE" 2>&1
+      ;;
+    midclt)
+      midclt call app.start "$app" >> "$LOG_FILE" 2>&1
+      ;;
+  esac
 }
 
 detect_tailscale_container() {
@@ -59,7 +133,7 @@ get_ports_from_backup() {
 get_app_name_for_container() {
   local container="$1"
   local apps
-  apps=$(cli -c "app list" 2>/dev/null | awk 'NR>3 && NF {print $1}' | grep -v '^-' || true)
+  apps=$(get_app_names)
   
   for app in $apps; do
     if [[ "$container" == "ix-${app}-"* ]]; then
@@ -169,9 +243,9 @@ verify_and_fix_port_bindings() {
     
     for app in "${apps_to_restart[@]}"; do
       log "  Restarting app: $app"
-      if cli -c "app stop $app" >> "$LOG_FILE" 2>&1; then
+      if app_stop "$app"; then
         sleep 5
-        if cli -c "app start $app" >> "$LOG_FILE" 2>&1; then
+        if app_start "$app"; then
           log "  Successfully restarted: $app"
         else
           log "  WARN: Failed to start: $app"
@@ -219,9 +293,9 @@ fix_restart_loops() {
     
     for app in "${apps_to_restart[@]}"; do
       log "  Restarting app to fix loop: $app"
-      cli -c "app stop $app" >> "$LOG_FILE" 2>&1 || true
+      app_stop "$app" || true
       sleep 5
-      cli -c "app start $app" >> "$LOG_FILE" 2>&1 || true
+      app_start "$app" || true
     done
     
     log "Waiting 30s for apps to stabilize..."
@@ -235,6 +309,12 @@ fix_restart_loops() {
 log "=========================================="
 log "==> Tailscale Serve Startup Script"
 log "=========================================="
+
+# Detect CLI method first
+if ! detect_cli_method; then
+  log "ERROR: Cannot proceed without working CLI"
+  exit 1
+fi
 
 # Wait for Tailscale container
 if ! wait_for_tailscale_container "$TAILSCALE_CONTAINER_TIMEOUT"; then
