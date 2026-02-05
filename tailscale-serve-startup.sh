@@ -462,6 +462,39 @@ fi
 
 log "Applying serves for ports: $(echo $ports | tr '\n' ' ')"
 
+# ============================================================================
+# Helper: verify a port is actually in tailscale serve status
+# ============================================================================
+verify_serve_active() {
+  local port="$1"
+  docker exec "$TS_CONTAINER" tailscale serve status 2>/dev/null | grep -q ":${port}" 
+}
+
+# ============================================================================
+# Helper: apply serve for a single port with verification and retry
+# ============================================================================
+apply_serve_for_port() {
+  local port="$1"
+  local max_attempts=3
+  
+  for attempt in $(seq 1 $max_attempts); do
+    docker exec "$TS_CONTAINER" tailscale serve --bg --https="$port" "http://127.0.0.1:$port" >/dev/null 2>&1
+    
+    # Verify it actually took effect
+    sleep 1
+    if verify_serve_active "$port"; then
+      return 0
+    fi
+    
+    if [[ $attempt -lt $max_attempts ]]; then
+      log "  Port $port: serve not active after attempt $attempt, retrying..."
+      sleep 2
+    fi
+  done
+  
+  return 1
+}
+
 success=0
 fail=0
 failed_ports=""
@@ -474,12 +507,12 @@ for port in $ports; do
     continue
   fi
   
-  if docker exec "$TS_CONTAINER" tailscale serve --bg --https="$port" "http://127.0.0.1:$port" >/dev/null 2>&1; then
+  if apply_serve_for_port "$port"; then
     success=$((success + 1))
   else
     fail=$((fail + 1))
     failed_ports="$failed_ports $port"
-    log "WARN: Failed to configure Tailscale serve for port $port"
+    log "WARN: Failed to configure Tailscale serve for port $port (not active after $max_attempts attempts)"
   fi
 done
 
@@ -503,9 +536,9 @@ if [[ $fail -gt 0 && -n "$failed_ports" ]]; then
     sleep 60
   fi
   
-  local retry_success=0
-  local retry_fail=0
-  local still_failed=""
+  retry_success=0
+  retry_fail=0
+  still_failed=""
   
   for port in $failed_ports; do
     # Check if something is now listening on this port
@@ -516,7 +549,7 @@ if [[ $fail -gt 0 && -n "$failed_ports" ]]; then
       continue
     fi
     
-    if docker exec "$TS_CONTAINER" tailscale serve --bg --https="$port" "http://127.0.0.1:$port" >/dev/null 2>&1; then
+    if apply_serve_for_port "$port"; then
       log "  Port $port: SUCCESS on retry"
       retry_success=$((retry_success + 1))
     else
@@ -534,6 +567,39 @@ if [[ $fail -gt 0 && -n "$failed_ports" ]]; then
   # Update totals
   success=$((success + retry_success))
   fail=$retry_fail
+fi
+
+# ============================================================================
+# Final verification: check all ports are actually in tailscale serve status
+# ============================================================================
+log "==> Final verification of all Tailscale serves..."
+missing_serves=""
+missing_count=0
+for port in $ports; do
+  if ! verify_serve_active "$port"; then
+    # Only flag as missing if something is listening (otherwise it was intentionally skipped)
+    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+      missing_serves="$missing_serves $port"
+      missing_count=$((missing_count + 1))
+      
+      # One last attempt to fix
+      log "  Port $port: missing from serve status, attempting recovery..."
+      if apply_serve_for_port "$port"; then
+        log "  Port $port: recovered"
+        missing_count=$((missing_count - 1))
+        missing_serves=$(echo "$missing_serves" | sed "s/ $port//")
+        success=$((success + 1))
+      else
+        log "  Port $port: FAILED recovery"
+      fi
+    fi
+  fi
+done
+
+if [[ $missing_count -eq 0 ]]; then
+  log "  All serves verified OK"
+else
+  log "  WARN: $missing_count port(s) still missing from serve status:$missing_serves"
 fi
 
 log "==> Final result: $success ports configured, $fail failed"
