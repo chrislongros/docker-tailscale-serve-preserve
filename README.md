@@ -4,7 +4,16 @@ Scripts to preserve Tailscale Serve configuration when using Watchtower for auto
 
 ## Screenshots
 
-<img width="2109" height="1025" alt="Screenshot 2026-01-12 at 21-32-26 TrueNAS - truenas-scale kangaroo-newton ts net" src="https://github.com/user-attachments/assets/cb41cd05-96c8-46bf-bc4c-79ab05ead8c4" />
+<img width="2109" height="999" alt="Screenshot 2026-02-07 at 18-56-31 TrueNAS - truenas-scale kangaroo-newton ts net" src="https://github.com/user-attachments/assets/ff145bf0-b4ae-41e7-82ef-7c3118d8c73b" />
+
+<img width="2109" height="997" alt="Screenshot 2026-02-07 at 18-56-45 TrueNAS - truenas-scale kangaroo-newton ts net" src="https://github.com/user-attachments/assets/1bcd8edf-0950-420d-8c28-6813aa3f1cd4" />
+
+<img width="2109" height="999" alt="Screenshot 2026-02-07 at 18-56-55 TrueNAS - truenas-scale kangaroo-newton ts net" src="https://github.com/user-attachments/assets/ab4766d0-c67d-40bd-8749-abefb15e2d8e" />
+
+<img width="2109" height="984" alt="Screenshot 2026-02-07 at 18-57-10 TrueNAS - truenas-scale kangaroo-newton ts net" src="https://github.com/user-attachments/assets/2aaf2a63-5359-4c27-ad51-d8d01140cb19" />
+
+<img width="2109" height="999" alt="Screenshot 2026-02-07 at 18-57-21 TrueNAS - truenas-scale kangaroo-newton ts net" src="https://github.com/user-attachments/assets/65531af8-c4f6-4443-9fa3-fb7e85449158" />
+
 
 ### TrueNAS Scale Cron Job Setup
 ![Cron Job Setup](screenshots/truenas-cron-job.png)
